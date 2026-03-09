@@ -1,3 +1,5 @@
+import os
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Security, Depends
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
@@ -6,6 +8,9 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import numpy as np
 from scipy.sparse import hstack
+
+# 🤫 Charge les variables d'environnement (pour le local et le cloud)
+load_dotenv()
 
 # Téléchargement du dictionnaire VADER (silencieux)
 nltk.download('vader_lexicon', quiet=True)
@@ -17,8 +22,10 @@ app = FastAPI(
     version="2.0"
 )
 
-# 🛡️ 1. Configuration de la sécurité
-API_KEY = "mon_super_token_secret_2024"
+# 🛡️ 1. Configuration de la sécurité (LE CHANGEMENT EST ICI)
+# On va chercher la clé secrète configurée sur Render !
+API_KEY = os.getenv("API_KEY") 
+
 api_key_header = APIKeyHeader(name="X-API-Key")
 
 def get_api_key(api_key_header: str = Security(api_key_header)):
