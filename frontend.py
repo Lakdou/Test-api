@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ⚠️ Remplace par l'URL de ton API sur Render quand elle sera en ligne
-API_URL = "http://127.0.0.1:8000/predict" 
+API_URL = "https://test-api-bcgp.onrender.com/predict" 
 
 # On récupère la clé API (via le .env en local, ou st.secrets sur Streamlit Cloud)
 API_KEY = os.getenv("API_KEY") 
