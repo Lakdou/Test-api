@@ -6,3 +6,6 @@ pydantic
 nltk
 scipy
 numpy
+streamlit
+requests
+python-dotenv
