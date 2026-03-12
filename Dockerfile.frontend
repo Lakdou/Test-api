@@ -1,17 +1,15 @@
-# On part d'un Linux vide avec Python
+# 1. On part d'un Python léger
 FROM python:3.12-slim
 
-# On se place dans un dossier /app
+# 2. Dossier de travail
 WORKDIR /app
 
-# On copie la liste des courses
+# 3. Installation des dépendances (Streamlit, requests, etc.)
 COPY requirements.txt .
-
-# On installe les librairies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# On copie tout le reste du code (dont frontend.py)
+# 4. On copie le code
 COPY . .
 
-# On dit à Docker de lancer Streamlit en utilisant le port fourni par le Cloud
-CMD ["sh", "-c", "streamlit run frontend.py --server.port ${PORT:-8501} --server.address 0.0.0.0"]
+# 5. On lance Streamlit en l'exposant vers l'extérieur
+CMD ["streamlit", "run", "frontend.py", "--server.port=8501", "--server.address=0.0.0.0"]

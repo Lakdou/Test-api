@@ -1,57 +1,105 @@
 import streamlit as st
 import requests
-import os
-from dotenv import load_dotenv
 
-# Charge les variables d'environnement (pour le local)
-load_dotenv()
+# 🌍 L'adresse de ton API à travers le Vigile Nginx
+API_URL = "http://nginx:80"
 
-# ⚠️ Remplace par l'URL de ton API sur Render quand elle sera en ligne
-API_URL = "https://test-api-bcgp.onrender.com/predict" 
+st.set_page_config(page_title="Analyse de Sentiment", page_icon="🧠")
+st.title("Analyse de Sentiment Trustpilot 🧠")
 
-# On récupère la clé API (via le .env en local, ou st.secrets sur Streamlit Cloud)
-API_KEY = os.getenv("API_KEY") 
+# --- 🧠 MÉMOIRE DE STREAMLIT ---
+if "token" not in st.session_state:
+    st.session_state["token"] = None
+if "role" not in st.session_state:
+    st.session_state["role"] = None
 
-st.title("🌟 Analyseur d'Avis Clients (LightGBM)")
-st.write("Entrez un avis ci-dessous pour savoir s'il est Positif, Neutre ou Négatif.")
-
-# Zone de texte pour l'utilisateur
-user_input = st.text_area("Avis client :", placeholder="Le produit est génial mais la livraison était en retard...")
-
-if st.button("Analyser le sentiment"):
-    if user_input.strip() == "":
-        st.warning("Veuillez entrer un texte avant d'analyser.")
-    else:
-        # 1. On prépare la requête pour l'API
-        headers = {
-            "X-API-Key": API_KEY,
-            "Content-Type": "application/json"
-        }
-        payload = {"text": user_input}
-
-        # 2. On appelle ton API (le moteur)
-        try:
-            with st.spinner("Analyse en cours par l'IA..."):
-                response = requests.post(API_URL, json=payload, headers=headers)
+# --- 🔒 BARRE LATÉRALE : INSCRIPTION & CONNEXION ---
+with st.sidebar:
+    if st.session_state["token"] is None:
+        
+        # Le sélecteur pour choisir le mode
+        choix = st.radio("Que voulez-vous faire ?", ["Connexion", "Inscription"])
+        st.divider() # Petite ligne de séparation
+        
+        if choix == "Inscription":
+            st.header("📝 Créer un compte")
+            new_username = st.text_input("Nouveau pseudo")
+            new_password = st.text_input("Nouveau mot de passe", type="password")
             
-            # 3. On affiche le résultat selon la réponse
-            if response.status_code == 200:
-                data = response.json()
-                sentiment = data["sentiment"]
-                score = data["prediction_score"]
-                
-                # Affichage dynamique selon la classe !
-                if sentiment == "Positif":
-                    st.success(f"🟢 **Sentiment : {sentiment}** (Confiance : {score})")
-                elif sentiment == "Négatif":
-                    st.error(f"🔴 **Sentiment : {sentiment}** (Confiance : {score})")
-                else:
-                    st.info(f"⚪ **Sentiment : {sentiment}** (Confiance : {score})")
+            if st.button("S'inscrire"):
+                if new_username and new_password:
+                    # On n'envoie plus le rôle ! L'API mettra "user" par défaut.
+                    payload = {"username": new_username, "password": new_password}
+                    res_creation = requests.post(f"{API_URL}/login", json=payload)
                     
-            elif response.status_code == 403:
-                st.error("⛔ Accès refusé : Vérifiez votre clé API.")
-            else:
-                st.error(f"⚠️ Erreur de l'API : {response.status_code}")
+                    if res_creation.status_code == 200:
+                        st.success("✅ Compte créé avec succès ! Vous avez le rôle standard 'user'.")
+                    elif res_creation.status_code == 400:
+                        st.error("❌ Ce nom d'utilisateur existe déjà.")
+                    else:
+                        st.error("❌ Erreur lors de la création du compte.")
+                else:
+                    st.warning("Veuillez remplir tous les champs.")
+
+        elif choix == "Connexion":
+            st.header("🔒 Connexion")
+            username = st.text_input("Pseudo")
+            password = st.text_input("Mot de passe", type="password")
+            
+            if st.button("Se connecter"):
+                # On demande le badge (Token)
+                response = requests.post(f"{API_URL}/token_API", json={"username": username, "password": password})
                 
-        except Exception as e:
-            st.error(f"🔌 Impossible de se connecter à l'API. Est-elle bien lancée ? Détails : {e}")
+                if response.status_code == 200:
+                    data = response.json()
+                    st.session_state["token"] = data["access_token"]
+                    st.session_state["role"] = data["role"]
+                    st.success("Connexion réussie !")
+                    st.rerun()
+                else:
+                    st.error("❌ Identifiants incorrects.")
+    else:
+        # L'utilisateur est connecté
+        st.success(f"Connecté en tant que : {st.session_state['role'].upper()}")
+        if st.button("Se déconnecter"):
+            st.session_state["token"] = None
+            st.session_state["role"] = None
+            st.rerun()
+
+# --- 🚀 PAGE PRINCIPALE : L'APPLICATION ---
+if st.session_state["token"]:
+    
+    st.write("Entrez un avis client ci-dessous pour analyser son sentiment.")
+    
+    user_input = st.text_area("Avis client :", placeholder="J'ai adoré ce produit, la livraison était rapide !")
+    
+    if st.button("Analyser l'avis"):
+        if user_input:
+            headers = {"X-API-Key": st.session_state["token"]}
+            payload = {"text": user_input}
+            
+            with st.spinner("Analyse en cours..."):
+                res = requests.post(f"{API_URL}/predict", headers=headers, json=payload)
+                
+                if res.status_code == 200:
+                    resultat = res.json()
+                    sentiment = resultat["sentiment"]
+                    score = resultat["prediction_score"]
+                    
+                    if sentiment == "Positif":
+                        st.success(f"✅ Sentiment : {sentiment} (Confiance : {score})")
+                    elif sentiment == "Négatif":
+                        st.error(f"❌ Sentiment : {sentiment} (Confiance : {score})")
+                    else:
+                        st.warning(f"😐 Sentiment : {sentiment} (Confiance : {score})")
+                        
+                elif res.status_code == 403:
+                    st.error("🛑 Nginx a bloqué la requête : Quota quotidien atteint (5/5) ou accès non autorisé.")
+                elif res.status_code == 503:
+                    st.error("🐌 Nginx a bloqué la requête : Vous allez trop vite (Anti-Spam) !")
+                else:
+                    st.error(f"Erreur technique : {res.status_code}")
+        else:
+            st.warning("Veuillez entrer un texte à analyser.")
+else:
+    st.info("👈 Veuillez vous connecter ou créer un compte dans le menu de gauche pour accéder à l'application.")

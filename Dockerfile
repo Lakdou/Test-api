@@ -4,6 +4,11 @@ FROM python:3.12-slim
 # 2. On définit le dossier de travail dans le conteneur
 WORKDIR /app
 
+# --- 🛠️ LA LIGNE MAGIQUE POUR LIGHTGBM ---
+# On réinstalle le composant Linux manquant pour les calculs
+RUN apt-get update && apt-get install -y libgomp1
+# -----------------------------------------
+
 # 3. On copie le fichier requirements pour installer les libs
 COPY requirements.txt .
 
