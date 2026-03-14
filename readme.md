@@ -26,7 +26,7 @@ Ce n'est pas un simple notebook Data Science — c'est une **architecture MLOps 
 10. [Sécurité](#-sécurité)
 11. [Frontend — Onglets](#-frontend--onglets)
 12. [Configuration](#-configuration)
-13. [Réentraîner le modèle](#-réentraîner-le-modèle)
+13. [Réentraîner le modèle & MLflow](#-réentraîner-le-modèle)
 14. [Résolution de problèmes](#-résolution-de-problèmes)
 15. [Technologies](#-technologies)
 16. [Licence](#-licence)
@@ -631,21 +631,69 @@ pytest tests/ -v
 
 ## 🔁 Réentraîner le modèle
 
-Si le monitoring indique un drift critique (`kl_divergence ≥ 0.30`) :
+Si le monitoring indique un drift critique (`kl_divergence ≥ 0.30`), utiliser le script de réentraînement intégré avec tracking MLflow.
 
-1. **Récupérer de nouvelles données** Trustpilot étiquetées
-2. **Réentraîner** avec le même pipeline (LightGBM + TF-IDF 5 000 features)
-3. **Sauvegarder** les nouveaux fichiers :
-   ```
-   models/trustpilot_lgbm_model.pkl
-   models/tfidf_vectorizer.pkl
-   ```
-4. **Redémarrer** les services pour recharger les modèles :
-   ```bash
-   docker compose restart api frontend
-   ```
+### Prérequis
 
-> Le modèle est chargé en mémoire au démarrage du container (singleton dans `ml_service.py`). Un simple restart suffit — pas besoin de rebuild.
+```bash
+pip install -r training/requirements_train.txt
+```
+
+### Lancer l'entraînement
+
+```bash
+# Entraînement avec les paramètres par défaut
+python training/train.py --data path/to/df_merged_clean.csv
+
+# Avec des hyperparamètres personnalisés
+python training/train.py \
+  --data path/to/df_merged_clean.csv \
+  --max-features 20000 \
+  --num-leaves 64 \
+  --learning-rate 0.05 \
+  --n-estimators 1000
+```
+
+Le script effectue automatiquement :
+- Nettoyage du CSV (filtrage, gestion des NaN)
+- Préprocessing texte (lowercase → suppression ponctuation/chiffres → tokenisation → stopwords → lemmatisation)
+- Regroupement des labels (1,2→Négatif · 3→Neutre · 4,5→Positif)
+- Rééquilibrage des classes (sous-échantillonnage)
+- Vectorisation TF-IDF
+- Entraînement LightGBM avec early stopping
+- **Log MLflow** : hyperparamètres, métriques, artefacts (matrice de confusion, feature importance, rapport de classification)
+- **Sauvegarde automatique** des `.pkl` dans `models/`
+
+### Voir les résultats dans MLflow
+
+```bash
+# Démarrer le serveur MLflow
+docker compose up mlflow
+
+# Ou sans Docker
+mlflow ui --backend-store-uri "file:///C:/Users/Lakdar/Test-api/mlflow" --port 5000
+```
+
+Ouvrir `http://localhost:5000` pour comparer les runs.
+
+### Ce qui est loggé dans MLflow
+
+| Type | Détail |
+|---|---|
+| **Paramètres** | max_features, learning_rate, num_leaves, n_estimators, ngram_range, subsample… |
+| **Métriques** | accuracy, f1_weighted, f1 par classe (Négatif/Neutre/Positif), precision par classe, best_iteration |
+| **Artefacts** | `confusion_matrix.png`, `feature_importance.png`, `classification_report.txt`, `.pkl` du modèle |
+| **Model Registry** | Modèle enregistré sous le nom `SentimentAI-LightGBM` avec versioning automatique |
+
+### Déployer le nouveau modèle
+
+Après entraînement, les `.pkl` sont automatiquement sauvegardés dans `models/`. Redémarrer les services :
+
+```bash
+docker compose restart api frontend
+```
+
+> Le modèle est chargé en mémoire au démarrage (singleton dans `ml_service.py`). Un simple restart suffit — pas besoin de rebuild.
 
 ---
 
@@ -726,6 +774,7 @@ docker compose up --build
 | **Frontend** | Streamlit + Altair | Interface dark glassmorphism |
 | **Conteneurisation** | Docker + Docker Compose | 3 services orchestrés |
 | **Persistance** | JSON (users) + JSONL (logs) | Fichiers montés en volumes Docker |
+| **Experiment tracking** | MLflow | Hyperparamètres, métriques, artefacts, model registry |
 | **Versioning data** | DVC | Configuration présente (`.dvc/`) |
 | **Sérialisation** | Joblib | Sauvegarde/chargement des modèles `.pkl` |
  
