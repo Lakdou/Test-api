@@ -9,8 +9,7 @@ streamlit
 requests
 python-dotenv
 fastapi
-uvicorn
-python-dotenv
+bcrypt
 lightgbm
 shap
 altair

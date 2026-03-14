@@ -2,12 +2,16 @@
 Chargement et utilisation du modèle LightGBM + TF-IDF.
 """
 
+import logging
 import joblib
+
 from ..core.config import MODEL_PATH, VECTORIZER_PATH
+
+logger = logging.getLogger(__name__)
 
 LABELS = {0: "Négatif", 1: "Neutre", 2: "Positif"}
 
-_model = None
+_model      = None
 _vectorizer = None
 
 
@@ -18,9 +22,9 @@ def get_model():
         try:
             _model      = joblib.load(MODEL_PATH)
             _vectorizer = joblib.load(VECTORIZER_PATH)
-            print("✅ Modèle LightGBM et TF-IDF chargés.")
+            logger.info("Modèle LightGBM et TF-IDF chargés avec succès.")
         except Exception as e:
-            print(f"❌ Erreur chargement modèle : {e}")
+            logger.error("Erreur lors du chargement du modèle : %s", e)
     return _model, _vectorizer
 
 

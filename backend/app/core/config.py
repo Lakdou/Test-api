@@ -18,5 +18,14 @@ PREDICTIONS_LOG = str(DATA_DIR / "predictions_log.jsonl")
 MODEL_PATH      = str(MODELS_DIR / "trustpilot_lgbm_model.pkl")
 VECTORIZER_PATH = str(MODELS_DIR / "tfidf_vectorizer.pkl")
 
-# Règles métier
-DAILY_QUOTA = 5
+# Règles métier — quotas
+DAILY_QUOTA      = 5    # Prédictions/jour pour les users standard
+TOKEN_EXPIRY_DAYS = 30  # Durée de validité d'un token API en jours
+
+# Seuils de monitoring drift
+KL_WARNING    = 0.10   # KL divergence : seuil d'avertissement
+KL_CRITICAL   = 0.30   # KL divergence : seuil critique → réentraînement
+MIN_CONFIDENCE = 0.55  # Confiance minimale acceptable
+
+# Rotation des logs
+MAX_LOG_LINES = 50_000  # Nombre max de lignes dans predictions_log.jsonl avant rotation

@@ -122,7 +122,7 @@ Test-api/
 │       ├── main.py                 # Point d'entrée : crée l'app FastAPI, inclut les routers
 │       ├── core/
 │       │   ├── config.py           # Chemins, constantes (DAILY_QUOTA=5, seuils KL, etc.)
-│       │   └── security.py         # hash_password (SHA-256), generate_token, require_admin
+│       │   └── security.py         # hash_password (bcrypt), verify_password, generate_token, require_admin
 │       ├── routes/
 │       │   ├── auth.py             # POST /login, POST /token_API, GET /verify_admin
 │       │   ├── predict.py          # POST /predict (protégé par Nginx auth_request)
@@ -160,9 +160,14 @@ Test-api/
 │   ├── users.json                  # Base utilisateurs (hash SHA-256, rôles, tokens, quotas)
 │   └── predictions_log.jsonl       # Log append-only de chaque prédiction (1 JSON par ligne)
 │
-└── models/                         # Modèles ML — montés en volume Docker (read-only)
-    ├── trustpilot_lgbm_model.pkl   # Modèle LightGBM entraîné (3 classes)
-    └── tfidf_vectorizer.pkl        # Vectoriseur TF-IDF fitté (5 000 features)
+├── models/                         # Modèles ML — montés en volume Docker (read-only)
+│   ├── trustpilot_lgbm_model.pkl   # Modèle LightGBM entraîné (3 classes)
+│   └── tfidf_vectorizer.pkl        # Vectoriseur TF-IDF fitté (5 000 features)
+│
+└── tests/                          # Tests automatisés (pytest)
+    ├── conftest.py                 # Fixtures partagées : client TestClient, mocks modèle ML, fichiers tmp
+    ├── test_auth.py                # Tests /login, /token_API, /verify_admin
+    └── test_predict.py             # Tests /predict, /quota/status, /predictions/history, /feedback, /health
 ```
 
 ---
@@ -334,21 +339,25 @@ curl -X POST http://localhost:8000/login \
 ```json
 {
   "alice": {
-    "password": "abc123...sha256hash",
+    "password": "$2b$12$...bcrypt_hash...",
     "role": "user",
     "api_key": "64charactershextoken...",
+    "token_expires_at": "2026-04-13",
     "daily_count": 3,
     "last_request_date": "2026-03-14"
   },
   "bob": {
-    "password": "def456...sha256hash",
+    "password": "$2b$12$...bcrypt_hash...",
     "role": "admin",
-    "api_key": "64charactershextoken..."
+    "api_key": "64charactershextoken...",
+    "token_expires_at": "2026-04-13"
   }
 }
 ```
 
-> `daily_count` et `last_request_date` n'existent que pour les utilisateurs avec `role: "user"`. Le quota se réinitialise automatiquement chaque jour (comparaison de la date ISO).
+> - `daily_count` et `last_request_date` n'existent que pour `role: "user"`. Le quota se réinitialise automatiquement chaque jour.
+> - `token_expires_at` : date ISO d'expiration du token (30 jours après connexion). Après cette date, le token est refusé.
+> - Les mots de passe sont hashés en **bcrypt** (les anciens comptes SHA-256 migrent automatiquement à la prochaine connexion).
 
 ---
 
@@ -376,8 +385,15 @@ POST /login
 ```json
 POST /token_API
 { "username": "alice", "password": "secret" }
-→ { "access_token": "07ad35ef...", "role": "user", "username": "alice" }
+→ {
+    "access_token": "07ad35ef...",
+    "token_expires_at": "2026-04-13",
+    "role": "user",
+    "username": "alice"
+  }
 ```
+
+> Le token expire au bout de **30 jours**. Après expiration, une nouvelle connexion via `/token_API` est requise.
 
 ### Prédiction
 
@@ -415,6 +431,7 @@ Body: { "text": "Ce produit est vraiment excellent, je recommande !" }
 
 | Méthode | Route | Accès | Description |
 |---|---|---|---|
+| `GET` | `/health` | Tous | Santé de l'API (modèle chargé, version) |
 | `GET` | `/quota/status` | Tous | Quota journalier restant |
 | `GET` | `/predictions/history` | Tous | Historique personnel (50 dernières) |
 | `POST` | `/feedback` | Tous | Marquer une prédiction comme correct/incorrect |
@@ -525,16 +542,23 @@ L'onglet `📡 Monitor` affiche :
 
 ### Backend
 
-- Mots de passe hashés en **SHA-256** (envisager bcrypt pour la production)
+- Mots de passe hashés en **bcrypt** (`passlib`) — résistant aux attaques par force brute
+- Migration automatique : les anciens hash SHA-256 sont rehashés en bcrypt à la prochaine connexion
 - Tokens API générés avec `secrets.token_hex(32)` — 64 caractères hexadécimaux, cryptographiquement sûrs
+- **Expiration des tokens** : chaque token est invalide 30 jours après émission (`token_expires_at`)
 - Quota journalier réinitialisé à minuit automatiquement (comparaison date ISO)
 - Admins exemptés du quota
+- **CORS** configuré sur les origines autorisées (`localhost:8501`, `localhost:8080`)
+- **`/health`** endpoint pour vérifier l'état de l'API et du modèle
+- **`threading.Lock`** sur la mise à jour du quota (protection contre les race conditions)
+- Logs d'erreurs structurés via le module `logging` standard
 
 ### Bonnes pratiques
 
 - Ne **jamais** committer `.env`, `data/users.json` avec de vrais mots de passe, ou les fichiers `.pkl`
 - En production, ne pas exposer le port `8000` (FastAPI direct) — tout doit passer par Nginx
 - Changer les mots de passe par défaut dès le premier déploiement
+- En production, restreindre les origines CORS dans `main.py`
 
 ---
 
@@ -565,11 +589,43 @@ L'onglet `📡 Monitor` affiche :
 ### Constantes métier (`backend/app/core/config.py`)
 
 ```python
-DAILY_QUOTA    = 5     # Prédictions/jour pour les users standard
-KL_WARNING     = 0.10  # Seuil d'alerte drift (KL divergence)
-KL_CRITICAL    = 0.30  # Seuil critique drift → réentraînement recommandé
-MIN_CONFIDENCE = 0.55  # Confiance minimale acceptable (55%)
+DAILY_QUOTA       = 5       # Prédictions/jour pour les users standard
+TOKEN_EXPIRY_DAYS = 30      # Durée de validité d'un token API (jours)
+KL_WARNING        = 0.10    # Seuil d'alerte drift (KL divergence)
+KL_CRITICAL       = 0.30    # Seuil critique drift → réentraînement recommandé
+MIN_CONFIDENCE    = 0.55    # Confiance minimale acceptable (55%)
+MAX_LOG_LINES     = 50_000  # Rotation automatique du log JSONL au-delà de ce seuil
 ```
+
+---
+
+## 🧪 Tests
+
+Les tests utilisent **pytest** et **FastAPI TestClient**. Le modèle ML est mocké — pas besoin des vrais fichiers `.pkl`.
+
+### Lancer les tests
+
+```bash
+# Installer les dépendances de test
+pip install pytest httpx
+
+# Lancer tous les tests depuis la racine du projet
+pytest tests/ -v
+```
+
+### Ce qui est testé
+
+| Fichier | Couverture |
+|---|---|
+| `test_auth.py` | Inscription (succès, doublon, validations username/password/role), connexion (succès, mauvais mdp, user inconnu), `/verify_admin` |
+| `test_predict.py` | Prédiction (succès, sans token, token invalide, texte vide/blanc), incrémentation quota, `/quota/status` user/admin, `/predictions/history`, `/feedback`, `/health` |
+
+### Structure des fixtures (`conftest.py`)
+
+- **`tmp_users_file`** : `users.json` vide dans un dossier temporaire (isolé entre tests)
+- **`tmp_log_file`** : `predictions_log.jsonl` vide temporaire
+- **`client`** : `TestClient` FastAPI avec modèle mocké (`MagicMock` retournant sentiment "Positif" à 85%)
+- **`register_and_login()`** : helper pour créer un compte et récupérer un token en une ligne
 
 ---
 
@@ -672,7 +728,7 @@ docker compose up --build
 | **Persistance** | JSON (users) + JSONL (logs) | Fichiers montés en volumes Docker |
 | **Versioning data** | DVC | Configuration présente (`.dvc/`) |
 | **Sérialisation** | Joblib | Sauvegarde/chargement des modèles `.pkl` |
-
+ 
 ---
 
 ## 📄 Licence

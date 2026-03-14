@@ -1,15 +1,24 @@
 """
 Surveillance du modèle : logging des prédictions, calcul de drift (divergence KL),
-recommandation de réentraînement.
+recommandation de réentraînement, rotation du fichier de log.
 """
 
 import json
+import logging
 import math
 import os
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
-from ..core.config import PREDICTIONS_LOG
+from ..core.config import (
+    PREDICTIONS_LOG,
+    KL_WARNING,
+    KL_CRITICAL,
+    MIN_CONFIDENCE,
+    MAX_LOG_LINES,
+)
+
+logger = logging.getLogger(__name__)
 
 # Distribution de référence (dataset équilibré 3 classes)
 TRAINING_DISTRIBUTION = {
@@ -18,9 +27,27 @@ TRAINING_DISTRIBUTION = {
     "Positif": 1 / 3,
 }
 
-KL_WARNING   = 0.10   # Seuil d'avertissement
-KL_CRITICAL  = 0.30   # Seuil critique → réentraînement
-MIN_CONFIDENCE = 0.55  # Confiance minimale acceptable
+
+# ── Rotation ──────────────────────────────────────────────────────────────────
+
+def _rotate_log_if_needed() -> None:
+    """
+    Si le fichier dépasse MAX_LOG_LINES lignes, supprime les plus anciennes
+    en ne gardant que les 80 % les plus récentes.
+    """
+    if not os.path.exists(PREDICTIONS_LOG):
+        return
+    with open(PREDICTIONS_LOG, "r", encoding="utf-8") as f:
+        lines = [l for l in f if l.strip()]
+
+    if len(lines) <= MAX_LOG_LINES:
+        return
+
+    keep = int(MAX_LOG_LINES * 0.8)
+    lines = lines[-keep:]
+    with open(PREDICTIONS_LOG, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    logger.info("Rotation du log : %d lignes conservées sur %d.", keep, MAX_LOG_LINES)
 
 
 # ── Écriture ──────────────────────────────────────────────────────────────────
@@ -32,7 +59,7 @@ def log_prediction(
     confidence: float,
     class_id: int,
 ) -> None:
-    """Enregistre une prédiction dans le fichier JSONL."""
+    """Enregistre une prédiction dans le fichier JSONL + déclenche la rotation si nécessaire."""
     entry = {
         "timestamp":    datetime.now().isoformat(),
         "username":     username,
@@ -46,6 +73,8 @@ def log_prediction(
     os.makedirs(os.path.dirname(PREDICTIONS_LOG), exist_ok=True)
     with open(PREDICTIONS_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    _rotate_log_if_needed()
 
 
 def update_feedback(timestamp: str, feedback: str) -> bool:
@@ -125,9 +154,9 @@ def get_monitoring_stats(days_recent: int = 7, days_all: int = 30) -> dict:
 
     if not all_logs:
         return {
-            "status": "no_data",
-            "message": "Aucune prédiction enregistrée.",
-            "total_predictions": 0,
+            "status":             "no_data",
+            "message":            "Aucune prédiction enregistrée.",
+            "total_predictions":  0,
             "recent_predictions": 0,
         }
 
@@ -138,9 +167,9 @@ def get_monitoring_stats(days_recent: int = 7, days_all: int = 30) -> dict:
     for cls in ["Négatif", "Neutre", "Positif"]:
         recent_dist.setdefault(cls, 0.0)
 
-    kl           = _kl_divergence(recent_dist, TRAINING_DISTRIBUTION)
-    avg_conf     = (sum(l["confidence"] for l in recent_logs) / len(recent_logs)
-                    if recent_logs else 0.0)
+    kl       = _kl_divergence(recent_dist, TRAINING_DISTRIBUTION)
+    avg_conf = (sum(l["confidence"] for l in recent_logs) / len(recent_logs)
+                if recent_logs else 0.0)
 
     # Timeline journalière
     daily: dict = defaultdict(lambda: {
@@ -166,16 +195,16 @@ def get_monitoring_stats(days_recent: int = 7, days_all: int = 30) -> dict:
         for day, v in sorted(daily.items())
     ]
 
-    drift_level = (
+    drift_level   = (
         "critical" if kl >= KL_CRITICAL
         else "warning" if kl >= KL_WARNING
         else "normal"
     )
-    conf_alert      = avg_conf < MIN_CONFIDENCE
-    needs_retrain   = drift_level == "critical" or (drift_level == "warning" and conf_alert)
+    conf_alert    = avg_conf < MIN_CONFIDENCE
+    needs_retrain = drift_level == "critical" or (drift_level == "warning" and conf_alert)
 
-    feedbacks       = [l for l in all_logs if l.get("feedback") is not None]
-    feedback_acc    = (
+    feedbacks    = [l for l in all_logs if l.get("feedback") is not None]
+    feedback_acc = (
         round(sum(1 for l in feedbacks if l["feedback"] == "correct") / len(feedbacks) * 100, 1)
         if feedbacks else None
     )
