@@ -1,0 +1,15 @@
+fastapi
+shap
+bcrypt
+pandas
+pydantic
+joblib
+referencing
+nltk
+dvc[s3]
+uvicorn
+lightgbm
+scikit-learn==1.8.0
+boto3
+prometheus-fastapi-instrumentator
+prometheus-client

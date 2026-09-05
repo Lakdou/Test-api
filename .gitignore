@@ -1,0 +1,51 @@
+# Données sensibles
+.env
+data/users.json
+data/predictions_log.jsonl
+
+# CSV d'entraînement (trop lourd pour Git)
+df_merged_clean.csv
+data/raw/df_merged_clean.csv
+data/raw/df_merged_clean_*.csv
+*.csv
+
+# Modèles ML (trop lourds — utiliser DVC ou partage manuel)
+models/*.pkl
+# Copies locales à la racine (versionnées via DVC dans models/)
+/trustpilot_lgbm_model.pkl
+/tfidf_vectorizer.pkl
+*.pkl
+
+# MLflow (runs locaux)
+mlflow/
+mlruns/
+
+# Présentations / binaires volumineux
+*.pptx
+
+# Artefacts d'entraînement temporaires
+training/artifacts/
+
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+/data-file.bin
+/models
+
+# Logs Airflow (tous les sous-dossiers)
+airflow/logs/
+
+# Artefacts d'entraînement temporaires
+training_artifacts/

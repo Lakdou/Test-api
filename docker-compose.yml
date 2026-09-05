@@ -1,0 +1,234 @@
+# ── Bloc commun Airflow (ancre YAML) ─────────────────────────────────────────
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "true"
+    AIRFLOW__API__AUTH_BACKEND: "airflow.api.auth.backend.basic_auth"
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:${AIRFLOW_GID:-50000}"
+  depends_on:
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+services:
+
+  # ── 1. Backend FastAPI ───────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        DAGSHUB_ACCESS_KEY: ${DAGSHUB_ACCESS_KEY}
+        DAGSHUB_SECRET_KEY: ${DAGSHUB_SECRET_KEY}
+    expose:
+      - "80"
+    volumes:
+      - ./data/users.json:/app/data/users.json
+      - ./data/predictions_log.jsonl:/app/data/predictions_log.jsonl
+      - ./models:/app/models
+      - ./models.dvc:/app/models.dvc
+
+  # ── 2. Reverse proxy Nginx ───────────────────────────────────────────────────
+  nginx:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+
+  # ── 3. Interface Streamlit ───────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./models:/app/models:ro
+    depends_on:
+      - nginx
+
+  # ── 4. MLflow Tracking Server ────────────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    profiles:
+      - training
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlflow:/mlflow
+    environment:
+      - MLFLOW_ALLOW_FILE_STORE=true
+    command: >
+      mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --allowed-hosts "*"
+        --cors-allowed-origins "*"
+        --backend-store-uri sqlite:////mlflow/mlflow.db
+        --default-artifact-root /mlflow/artifacts
+
+  # ── 5. Training API ──────────────────────────────────────────────────────────
+  training-api:
+    build:
+      context: .
+      dockerfile: training/Dockerfile
+    profiles:
+      - training
+    expose:
+      - "8000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./models.dvc:/app/models.dvc
+      - ./mlflow:/mlflow
+      - ./mlflow:/app/mlflow
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - DAGSHUB_ACCESS_KEY=${DAGSHUB_ACCESS_KEY}
+      - DAGSHUB_SECRET_KEY=${DAGSHUB_SECRET_KEY}
+      - GIT_USER=${GIT_USER}
+      - GIT_TOKEN=${GIT_TOKEN}
+    depends_on:
+      - mlflow
+
+  # ── 6. Base de données Airflow (PostgreSQL) ──────────────────────────────────
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    restart: always
+
+  # ── 7. Redis (broker Celery pour Airflow) ────────────────────────────────────
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 50
+    restart: always
+
+  # ── 8. Airflow Webserver ─────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8081:8080"          # 8080 est déjà pris par Nginx → on utilise 8081
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  # ── 9. Airflow Scheduler ─────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"',
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  # ── 10. Airflow Worker ───────────────────────────────────────────────────────
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  # ── 11. Airflow Init (s'exécute une seule fois) ──────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+
+  # ── 12. Flower (monitoring Celery) ───────────────────────────────────────────
+  flower:
+    <<: *airflow-common
+    command: celery flower
+    ports:
+      - "5556:5555"          # 5555 potentiellement occupé → on utilise 5556
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  # ── 13. Prometheus ──────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # ── 14. Grafana ─────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-storage:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  postgres-db-volume:
+  grafana-storage:
